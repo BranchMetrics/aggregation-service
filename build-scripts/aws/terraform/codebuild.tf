@@ -24,7 +24,7 @@ data "aws_caller_identity" "current" {}
 
 # Read release version from VERSION file in <repository_root>
 data "local_file" "version" {
-  filename = "../../../VERSION"
+  filename = "../VERSION"
 }
 
 locals {
