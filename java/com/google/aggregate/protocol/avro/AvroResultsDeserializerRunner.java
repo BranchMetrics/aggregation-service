@@ -29,6 +29,7 @@ import com.google.inject.Inject;
 import java.io.BufferedWriter;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Paths;
 
 /** Reads an Avro results file and writes a CSV of the data */
@@ -53,7 +54,7 @@ final class AvroResultsDeserializerRunner {
   private void runResultDeserialization(AvroResultsDeserializerRunnerArgs args) throws IOException {
     ImmutableList<AggregatedFact> writtenResults =
         reader.readAvroResultsFile(Paths.get(args.getResultsFilePath()));
-    BufferedWriter writer = new BufferedWriter(new FileWriter(args.getOutputPath()));
+    BufferedWriter writer = Files.newBufferedWriter(args.getOutputPath().toPath());
     writer.write("bucket,metric" + "\n");
     for (AggregatedFact fact : writtenResults) {
       writer.write(formatOutput(fact, args.isOutputBucketAsHex()) + "\n");
