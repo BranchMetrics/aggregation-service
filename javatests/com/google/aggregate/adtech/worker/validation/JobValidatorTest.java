@@ -56,7 +56,9 @@ public class JobValidatorTest {
 
     assertThat(exception)
         .hasMessageThat()
-        .containsMatch("Job parameters does not have an attribution_report_to field for the Job");
+        .containsMatch(
+            "Exactly one of 'attribution_report_to' and 'reporting_site' fields should be specified"
+                + " for the Job");
   }
 
   @Test
@@ -71,7 +73,8 @@ public class JobValidatorTest {
 
     assertThat(exception)
         .hasMessageThat()
-        .containsMatch("Job parameters does not have an attribution_report_to field for the Job");
+        .containsMatch(
+            "The 'attribution_report_to' field in the Job parameters is empty for the Job");
   }
 
   @Test
@@ -211,6 +214,52 @@ public class JobValidatorTest {
   }
 
   @Test
+  public void validate_validInputReportCount_succeeds() {
+    Job jobWithoutCount = buildJob(ImmutableMap.of("attribution_report_to", "foo.com")).build();
+    Job jobWithEmptyString =
+        buildJob(ImmutableMap.of("attribution_report_to", "foo.com", "input_report_count", " "))
+            .build();
+    Job jobWithTrailingSpace =
+        buildJob(
+                ImmutableMap.of(
+                    "attribution_report_to", "foo.com", "input_report_count", "100     "))
+            .build();
+    Job jobWithZeroReportCount =
+        buildJob(ImmutableMap.of("attribution_report_to", "foo.com", "input_report_count", "0"))
+            .build();
+
+    JobValidator.validate(Optional.of(jobWithoutCount), /* domainOptional= */ true);
+    JobValidator.validate(Optional.of(jobWithEmptyString), /* domainOptional= */ true);
+    JobValidator.validate(Optional.of(jobWithTrailingSpace), /* domainOptional= */ true);
+    JobValidator.validate(Optional.of(jobWithZeroReportCount), /* domainOptional= */ true);
+  }
+
+  @Test
+  public void validate_invalidInputReportCount_fails() {
+    Job job1 =
+        buildJob(ImmutableMap.of("attribution_report_to", "foo.com", "input_report_count", "-1"))
+            .build();
+    Job job2 =
+        buildJob(
+                ImmutableMap.of(
+                    "attribution_report_to", "foo.com", "input_report_count", "not a number"))
+            .build();
+    Job job3 =
+        buildJob(ImmutableMap.of("attribution_report_to", "foo.com", "input_report_count", "100.1"))
+            .build();
+
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> JobValidator.validate(Optional.of(job1), /* domainOptional= */ true));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> JobValidator.validate(Optional.of(job2), /* domainOptional= */ true));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> JobValidator.validate(Optional.of(job3), /* domainOptional= */ true));
+  }
+
+  @Test
   public void validate_reportErrorThresholdPercentageNotANumber_fails() {
     Job job1 =
         buildJob(
@@ -296,6 +345,39 @@ public class JobValidatorTest {
     assertThrows(
         IllegalArgumentException.class,
         () -> JobValidator.validate(Optional.of(jobWithNonNumberIds), /* domainOptional= */ true));
+  }
+
+  @Test
+  public void validate_noReportingSite_fails() {
+    ImmutableMap<String, String> jobParams = ImmutableMap.of("reporting_site", "");
+    Job job = buildJob(jobParams).build();
+
+    IllegalArgumentException exception =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> JobValidator.validate(Optional.of(job), /* domainOptional= */ false));
+
+    assertThat(exception)
+        .hasMessageThat()
+        .containsMatch("The 'reporting_site' field in the Job parameters is empty for the Job");
+  }
+
+  @Test
+  public void validate_attributionReportToAndReportingSiteBothPresent_fails() {
+    ImmutableMap<String, String> jobParams =
+        ImmutableMap.of("attribution_report_to", "someOrigin", "reporting_site", "someSite");
+    Job job = buildJob(jobParams).build();
+
+    IllegalArgumentException exception =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> JobValidator.validate(Optional.of(job), /* domainOptional= */ false));
+
+    assertThat(exception)
+        .hasMessageThat()
+        .containsMatch(
+            "Exactly one of 'attribution_report_to' and 'reporting_site' fields should be specified"
+                + " for the Job");
   }
 
   private Job.Builder buildJob(ImmutableMap jobParams) {

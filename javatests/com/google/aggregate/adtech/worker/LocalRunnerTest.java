@@ -16,15 +16,14 @@
 
 package com.google.aggregate.adtech.worker;
 
+import static com.google.aggregate.adtech.worker.util.NumericConversions.createBucketFromString;
 import static com.google.common.truth.Truth.assertThat;
 import static org.junit.Assert.assertThrows;
-import static org.junit.Assert.fail;
 
 import com.beust.jcommander.ParameterException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.aggregate.adtech.worker.model.AggregatedFact;
-import com.google.aggregate.adtech.worker.util.NumericConversions;
 import com.google.common.math.Stats;
 import com.google.common.util.concurrent.ServiceManager;
 import com.google.privacysandbox.otel.OTelConfiguration;
@@ -474,7 +473,7 @@ public class LocalRunnerTest {
         convertToAggregatedFact(objectMapper.readTree(Files.newInputStream(outputJson)));
     List<AggregatedFact> nonZeroFacts =
         output.stream()
-            .filter((aggregatedFact) -> aggregatedFact.metric() != 0)
+            .filter((aggregatedFact) -> aggregatedFact.getMetric() != 0)
             .collect(Collectors.toList());
 
     assertThat(nonZeroFacts).hasSize(0);
@@ -505,7 +504,7 @@ public class LocalRunnerTest {
     Path outputJson = outputDirectoryPath.resolve("output.json");
     List<AggregatedFact> output =
         convertToAggregatedFact(objectMapper.readTree(Files.newInputStream(outputJson)));
-    Stream<Long> allMetrics = output.stream().map(aggregatedFact -> aggregatedFact.metric());
+    Stream<Long> allMetrics = output.stream().map(aggregatedFact -> aggregatedFact.getMetric());
     Stats statsAccumulator = Stats.of(allMetrics.collect(Collectors.toList()));
 
     assertThat(statsAccumulator.count()).isEqualTo(10000);
@@ -540,7 +539,7 @@ public class LocalRunnerTest {
     Path outputJson = outputDirectoryPath.resolve("output.json");
     List<AggregatedFact> output =
         convertToAggregatedFact(objectMapper.readTree(Files.newInputStream(outputJson)));
-    Stream<Long> allMetrics = output.stream().map(aggregatedFact -> aggregatedFact.metric());
+    Stream<Long> allMetrics = output.stream().map(aggregatedFact -> aggregatedFact.getMetric());
     Stats statsAccumulator = Stats.of(allMetrics.collect(Collectors.toList()));
 
     assertThat(statsAccumulator.count()).isEqualTo(10000);
@@ -573,7 +572,7 @@ public class LocalRunnerTest {
     Path outputJson = outputDirectoryPath.resolve("output.json");
     List<AggregatedFact> output =
         convertToAggregatedFact(objectMapper.readTree(Files.newInputStream(outputJson)));
-    Stream<Long> allMetrics = output.stream().map(aggregatedFact -> aggregatedFact.metric());
+    Stream<Long> allMetrics = output.stream().map(aggregatedFact -> aggregatedFact.getMetric());
     Stats statsAccumulator = Stats.of(allMetrics.collect(Collectors.toList()));
 
     assertThat(statsAccumulator.count()).isEqualTo(10000);
@@ -701,7 +700,7 @@ public class LocalRunnerTest {
     Path outputJson = outputDirectoryPath.resolve("output.json");
     List<AggregatedFact> output =
         convertToAggregatedFact(objectMapper.readTree(Files.newInputStream(outputJson)));
-    Stream<Long> allMetrics = output.stream().map(aggregatedFact -> aggregatedFact.metric());
+    Stream<Long> allMetrics = output.stream().map(aggregatedFact -> aggregatedFact.getMetric());
     Stats statsAccumulator = Stats.of(allMetrics.collect(Collectors.toList()));
 
     assertThat(statsAccumulator.count()).isEqualTo(10000);
@@ -738,7 +737,7 @@ public class LocalRunnerTest {
         convertToAggregatedFact(objectMapper.readTree(Files.newInputStream(outputJson)));
     List<AggregatedFact> nonZeroFacts =
         output.stream()
-            .filter((aggregatedFact) -> aggregatedFact.metric() != 0)
+            .filter((aggregatedFact) -> aggregatedFact.getMetric() != 0)
             .collect(Collectors.toList());
 
     assertThat(nonZeroFacts).isEmpty();
@@ -750,14 +749,10 @@ public class LocalRunnerTest {
         .iterator()
         .forEachRemaining(
             entry -> {
-              try {
-                writtenResults.add(
-                    AggregatedFact.create(
-                        NumericConversions.uInt128FromBytes(entry.get("bucket").binaryValue()),
-                        entry.get("metric").asLong()));
-              } catch (IOException e) {
-                fail(e.getMessage());
-              }
+              writtenResults.add(
+                  AggregatedFact.create(
+                      createBucketFromString(entry.get("bucket").asText()),
+                      entry.get("metric").asLong()));
             });
     return writtenResults;
   }

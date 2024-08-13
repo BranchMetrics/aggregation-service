@@ -16,15 +16,19 @@
 
 package com.google.aggregate.adtech.worker.validation;
 
+import static com.google.aggregate.adtech.worker.util.JobUtils.JOB_PARAM_ATTRIBUTION_REPORT_TO;
 import static com.google.aggregate.adtech.worker.util.JobUtils.JOB_PARAM_FILTERING_IDS;
 import static com.google.aggregate.adtech.worker.util.JobUtils.JOB_PARAM_FILTERING_IDS_DELIMITER;
+import static com.google.aggregate.adtech.worker.util.JobUtils.JOB_PARAM_INPUT_REPORT_COUNT;
 import static com.google.aggregate.adtech.worker.util.JobUtils.JOB_PARAM_OUTPUT_DOMAIN_BLOB_PREFIX;
 import static com.google.aggregate.adtech.worker.util.JobUtils.JOB_PARAM_OUTPUT_DOMAIN_BUCKET_NAME;
+import static com.google.aggregate.adtech.worker.util.JobUtils.JOB_PARAM_REPORTING_SITE;
 import static com.google.aggregate.adtech.worker.util.JobUtils.JOB_PARAM_REPORT_ERROR_THRESHOLD_PERCENTAGE;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.scp.operator.shared.model.BackendModelUtil.toJobKeyString;
 
 import com.google.aggregate.adtech.worker.util.NumericConversions;
+import com.google.common.primitives.Longs;
 import com.google.scp.operator.cpio.jobclient.model.Job;
 import java.util.Map;
 import java.util.Optional;
@@ -41,16 +45,7 @@ public final class JobValidator {
   public static void validate(Optional<Job> job, boolean domainOptional) {
     checkArgument(job.isPresent(), "Job metadata not found.");
     String jobKey = toJobKeyString(job.get().jobKey());
-    checkArgument(
-        job.get().requestInfo().getJobParametersMap().containsKey("attribution_report_to")
-            && !job.get()
-                .requestInfo()
-                .getJobParametersMap()
-                .get("attribution_report_to")
-                .trim()
-                .isEmpty(),
-        String.format(
-            "Job parameters does not have an attribution_report_to field for the Job %s.", jobKey));
+    validateReportingOriginAndSite(job.get());
     Map<String, String> jobParams = job.get().requestInfo().getJobParametersMap();
     checkArgument(
         domainOptional
@@ -72,6 +67,12 @@ public final class JobValidator {
             "Job parameters for the job '%s' should have a valid value between 0 and 100 for"
                 + " 'report_error_threshold_percentage' parameter.",
             jobKey));
+    checkArgument(
+        isAValidCount(jobParams.get(JOB_PARAM_INPUT_REPORT_COUNT)),
+        String.format(
+            "Job parameters for the job '%s' should have a valid non-negative value for"
+                + " 'input_report_count' parameter.",
+            jobKey));
 
     String filteringIds = jobParams.getOrDefault(JOB_PARAM_FILTERING_IDS, null);
     checkArgument(
@@ -82,10 +83,61 @@ public final class JobValidator {
             jobKey));
   }
 
+  /**
+   * Validates that exactly one of the two fields 'JOB_PARAM_ATTRIBUTION_REPORT_TO' and
+   * 'reporting_site' is specified and the specified field is non-empty
+   */
+  private static void validateReportingOriginAndSite(Job job) {
+    Map<String, String> jobParams = job.requestInfo().getJobParametersMap();
+    String jobKey = toJobKeyString(job.jobKey());
+    boolean bothSiteAndOriginSpecified =
+        jobParams.containsKey(JOB_PARAM_ATTRIBUTION_REPORT_TO)
+            && jobParams.containsKey(JOB_PARAM_REPORTING_SITE);
+    boolean neitherSiteOrOriginSpecified =
+        !jobParams.containsKey(JOB_PARAM_ATTRIBUTION_REPORT_TO)
+            && !jobParams.containsKey(JOB_PARAM_REPORTING_SITE);
+    if (bothSiteAndOriginSpecified || neitherSiteOrOriginSpecified) {
+      throw new IllegalArgumentException(
+          String.format(
+              "Exactly one of 'attribution_report_to' and 'reporting_site' fields should be"
+                  + " specified for the Job %s. It is recommended to use 'reporting_site'"
+                  + " parameter. Parameter 'attribution_report_to' will be deprecated in the next"
+                  + " major version upgrade of the API",
+              jobKey));
+    }
+    // Verify that either the field 'JOB_PARAM_ATTRIBUTION_REPORT_TO' is not specified or is
+    // non-empty.
+    boolean emptyAttributionReportToSpecified =
+        jobParams.containsKey(JOB_PARAM_ATTRIBUTION_REPORT_TO)
+            && jobParams.get(JOB_PARAM_ATTRIBUTION_REPORT_TO).trim().isEmpty();
+    checkArgument(
+        !emptyAttributionReportToSpecified,
+        String.format(
+            "The 'attribution_report_to' field in the Job parameters is empty for" + " the Job %s.",
+            jobKey));
+    // Verify that either the field 'reporting_site' is not specified or is non-empty.
+    boolean emptyReportingSiteSpecified =
+        jobParams.containsKey(JOB_PARAM_REPORTING_SITE)
+            && jobParams.get(JOB_PARAM_REPORTING_SITE).trim().isEmpty();
+    checkArgument(
+        !emptyReportingSiteSpecified,
+        String.format(
+            "The 'reporting_site' field in the Job parameters is empty for the Job" + " %s.",
+            jobKey));
+  }
+
+  /** Checks if the string represents a non-negative number or is empty. */
+  private static boolean isAValidCount(String countInString) {
+    return countInString == null
+        || countInString.trim().isEmpty()
+        || (Longs.tryParse(countInString.trim()) != null
+            && Longs.tryParse(countInString.trim()) >= 0);
+  }
+
   /** Checks if the given string is a list of integers separated by delimiter. */
   private static boolean validStringOfIntegers(String stringOfNumbers, String delimiter) {
     try {
-      NumericConversions.getIntegersFromString(stringOfNumbers, delimiter);
+      NumericConversions.getUnsignedLongsFromString(stringOfNumbers, delimiter);
       return true;
     } catch (IllegalArgumentException iae) {
       return false;

@@ -33,11 +33,11 @@ import static com.google.aggregate.adtech.worker.util.JobUtils.JOB_PARAM_OUTPUT_
 import static com.google.aggregate.adtech.worker.util.JobUtils.JOB_PARAM_OUTPUT_DOMAIN_BUCKET_NAME;
 import static com.google.aggregate.adtech.worker.util.JobUtils.JOB_PARAM_REPORT_ERROR_THRESHOLD_PERCENTAGE;
 import static com.google.common.collect.ImmutableList.toImmutableList;
-import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static com.google.scp.operator.shared.model.BackendModelUtil.toJobKeyString;
 
 import com.google.aggregate.adtech.worker.AggregationWorkerReturnCode;
 import com.google.aggregate.adtech.worker.Annotations.BlockingThreadPool;
+import com.google.aggregate.adtech.worker.Annotations.EnablePrivacyBudgetKeyFiltering;
 import com.google.aggregate.adtech.worker.Annotations.NonBlockingThreadPool;
 import com.google.aggregate.adtech.worker.Annotations.ReportErrorThresholdPercentage;
 import com.google.aggregate.adtech.worker.Annotations.StreamingOutputDomainProcessing;
@@ -58,7 +58,10 @@ import com.google.aggregate.adtech.worker.model.DecryptionValidationResult;
 import com.google.aggregate.adtech.worker.model.EncryptedReport;
 import com.google.aggregate.adtech.worker.util.DebugSupportHelper;
 import com.google.aggregate.adtech.worker.util.JobResultHelper;
+import com.google.aggregate.adtech.worker.util.JobUtils;
 import com.google.aggregate.adtech.worker.util.NumericConversions;
+import com.google.aggregate.adtech.worker.util.ReportingOriginUtils;
+import com.google.aggregate.adtech.worker.util.ReportingOriginUtils.InvalidReportingOriginException;
 import com.google.aggregate.adtech.worker.validation.ValidationException;
 import com.google.aggregate.perf.StopwatchRegistry;
 import com.google.aggregate.privacy.budgeting.bridge.PrivacyBudgetingServiceBridge;
@@ -71,8 +74,7 @@ import com.google.aggregate.protocol.avro.AvroReportsReaderFactory;
 import com.google.common.base.Stopwatch;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.util.concurrent.Futures;
-import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.primitives.UnsignedLong;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.errorprone.annotations.Var;
 import com.google.privacysandbox.otel.OTelConfiguration;
@@ -89,7 +91,6 @@ import io.reactivex.rxjava3.core.Observable;
 import io.reactivex.rxjava3.schedulers.Schedulers;
 import java.io.IOException;
 import java.io.InputStream;
-import java.math.BigInteger;
 import java.security.AccessControlException;
 import java.util.List;
 import java.util.Map;
@@ -110,6 +111,8 @@ public final class ConcurrentAggregationProcessor implements JobProcessor {
   public static final String JOB_PARAM_ATTRIBUTION_REPORT_TO = "attribution_report_to";
   // Key to indicate whether this is a debug job
   public static final String JOB_PARAM_DEBUG_RUN = "debug_run";
+  // Key for user provided reporting site value in the job params of the job request.
+  public static final String JOB_PARAM_REPORTING_SITE = "reporting_site";
 
   private static final int NUM_CPUS = Runtime.getRuntime().availableProcessors();
   // In aggregation service, reading is much faster than decryption, and most of the time, it waits
@@ -145,8 +148,11 @@ public final class ConcurrentAggregationProcessor implements JobProcessor {
   private final PrivacyBudgetingServiceBridge privacyBudgetingServiceBridge;
   private final ListeningExecutorService blockingThreadPool;
   private final ListeningExecutorService nonBlockingThreadPool;
+  private final boolean enablePrivacyBudgetKeyFiltering;
   private final OTelConfiguration oTelConfiguration;
   private final double defaultReportErrorThresholdPercentage;
+
+  // TODO(b/338219415): Reuse this flag to enable full streaming approach.
   private final Boolean streamingOutputDomainProcessing;
 
   @Inject
@@ -166,7 +172,8 @@ public final class ConcurrentAggregationProcessor implements JobProcessor {
       @BlockingThreadPool ListeningExecutorService blockingThreadPool,
       @NonBlockingThreadPool ListeningExecutorService nonBlockingThreadPool,
       @ReportErrorThresholdPercentage double defaultReportErrorThresholdPercentage,
-      @StreamingOutputDomainProcessing Boolean streamingOutputDomainProcessing) {
+      @StreamingOutputDomainProcessing Boolean streamingOutputDomainProcessing,
+      @EnablePrivacyBudgetKeyFiltering boolean enablePrivacyBudgetKeyFiltering) {
     this.reportDecrypterAndValidator = reportDecrypterAndValidator;
     this.aggregationEngineFactory = aggregationEngineFactory;
     this.outputDomainProcessor = outputDomainProcessor;
@@ -183,6 +190,7 @@ public final class ConcurrentAggregationProcessor implements JobProcessor {
     this.oTelConfiguration = oTelConfiguration;
     this.defaultReportErrorThresholdPercentage = defaultReportErrorThresholdPercentage;
     this.streamingOutputDomainProcessing = streamingOutputDomainProcessing;
+    this.enablePrivacyBudgetKeyFiltering = enablePrivacyBudgetKeyFiltering;
   }
 
   /**
@@ -215,7 +223,7 @@ public final class ConcurrentAggregationProcessor implements JobProcessor {
     if (jobParams.containsKey(JOB_PARAM_OUTPUT_DOMAIN_BUCKET_NAME)
         && jobParams.containsKey(JOB_PARAM_OUTPUT_DOMAIN_BLOB_PREFIX)
         && (!jobParams.get(JOB_PARAM_OUTPUT_DOMAIN_BUCKET_NAME).isEmpty()
-            || !jobParams.get(JOB_PARAM_OUTPUT_DOMAIN_BLOB_PREFIX).isEmpty())) {
+        || !jobParams.get(JOB_PARAM_OUTPUT_DOMAIN_BLOB_PREFIX).isEmpty())) {
       outputDomainLocation =
           Optional.of(
               BlobStorageClient.getDataLocation(
@@ -255,12 +263,19 @@ public final class ConcurrentAggregationProcessor implements JobProcessor {
 
     try {
       double reportErrorThresholdPercentage = getReportErrorThresholdPercentage(jobParams);
-      AggregationEngine aggregationEngine = aggregationEngineFactory.create();
+      @Var ImmutableSet<UnsignedLong> filteringIds = ImmutableSet.of();
+      if (enablePrivacyBudgetKeyFiltering) {
+        filteringIds =
+            NumericConversions.getUnsignedLongsFromString(
+                jobParams.get(JobUtils.JOB_PARAM_FILTERING_IDS),
+                JobUtils.JOB_PARAM_FILTERING_IDS_DELIMITER);
+      }
+      AggregationEngine aggregationEngine = aggregationEngineFactory.create(filteringIds);
       // TODO(b/218924983) Estimate report counts to enable failing early on report errors reaching
       // threshold.
       ErrorSummaryAggregator errorAggregator =
           ErrorSummaryAggregator.createErrorSummaryAggregator(
-              Optional.empty(), reportErrorThresholdPercentage);
+              getInputReportCountFromJobParams(jobParams), reportErrorThresholdPercentage);
       AtomicLong totalReportCount = new AtomicLong(0);
 
       try (Timer reportsProcessTimer =
@@ -282,7 +297,6 @@ public final class ConcurrentAggregationProcessor implements JobProcessor {
 
       NoisedAggregatedResultSet noisedResultSet;
       try {
-        if (streamingOutputDomainProcessing) {
           noisedResultSet =
               conflateWithDomainAndAddNoiseStreaming(
                   outputDomainLocation,
@@ -290,26 +304,9 @@ public final class ConcurrentAggregationProcessor implements JobProcessor {
                   aggregationEngine,
                   debugPrivacyEpsilon,
                   debugRun);
-
-        } else {
-          noisedResultSet =
-              conflateWithDomainAndAddNoise(
-                  outputDomainLocation,
-                  outputDomainShards,
-                  aggregationEngine,
-                  debugPrivacyEpsilon,
-                  debugRun);
-        }
       } catch (DomainReadException e) {
         throw new AggregationJobProcessException(
             INPUT_DATA_READ_FAILED, "Exception while reading domain input data.", e.getCause());
-      } catch (ExecutionException e) {
-        if (e.getCause() instanceof DomainReadException) {
-          throw new AggregationJobProcessException(
-              INPUT_DATA_READ_FAILED, "Exception while reading domain input data.", e.getCause());
-        }
-        throw new AggregationJobProcessException(
-            INTERNAL_ERROR, "Exception in processing domain.", e);
       }
 
       processingStopwatch.stop();
@@ -339,7 +336,7 @@ public final class ConcurrentAggregationProcessor implements JobProcessor {
           job, errorSummary, jobCode, /* message= */ Optional.empty());
     } catch (ResultLogException e) {
       throw new AggregationJobProcessException(
-          RESULT_WRITE_ERROR, "Exception occured while writing result.", e);
+          RESULT_WRITE_ERROR, "Exception occurred while writing result.", e);
     } catch (AccessControlException e) {
       throw new AggregationJobProcessException(
           PERMISSION_ERROR, "Exception because of missing permission.", e);
@@ -360,6 +357,14 @@ public final class ConcurrentAggregationProcessor implements JobProcessor {
     }
   }
 
+  private static Optional<Long> getInputReportCountFromJobParams(Map<String, String> jobParams) {
+    String inputReportCount = jobParams.get(JobUtils.JOB_PARAM_INPUT_REPORT_COUNT);
+    if (inputReportCount == null || inputReportCount.trim().isEmpty()) {
+      return Optional.empty();
+    }
+    return Optional.ofNullable(Long.parseLong(inputReportCount.trim()));
+  }
+
   private NoisedAggregatedResultSet conflateWithDomainAndAddNoiseStreaming(
       Optional<DataLocation> outputDomainLocation,
       ImmutableList<DataLocation> outputDomainShards,
@@ -374,34 +379,6 @@ public final class ConcurrentAggregationProcessor implements JobProcessor {
         noisedAggregationRunner,
         debugPrivacyEpsilon,
         debugRun);
-  }
-
-  private NoisedAggregatedResultSet conflateWithDomainAndAddNoise(
-      Optional<DataLocation> outputDomainLocation,
-      ImmutableList<DataLocation> outputDomainShards,
-      AggregationEngine engine,
-      Optional<Double> debugPrivacyEpsilon,
-      Boolean debugRun)
-      throws DomainReadException, ExecutionException, InterruptedException {
-    @Var
-    ListenableFuture<ImmutableSet<BigInteger>> outputDomainFuture =
-        outputDomainLocation
-            .map(loc -> outputDomainProcessor.readAndDedupeDomain(loc, outputDomainShards))
-            .orElse(immediateFuture(ImmutableSet.of()));
-
-    ListenableFuture<NoisedAggregatedResultSet> aggregationFinalFuture =
-        Futures.transform(
-            outputDomainFuture,
-            outputDomain ->
-                outputDomainProcessor.adjustAggregationWithDomainAndNoise(
-                    noisedAggregationRunner,
-                    outputDomain,
-                    engine.makeAggregation(),
-                    debugPrivacyEpsilon,
-                    debugRun),
-            nonBlockingThreadPool);
-
-    return aggregationFinalFuture.get();
   }
 
   private double getReportErrorThresholdPercentage(Map<String, String> jobParams) {
@@ -426,16 +403,34 @@ public final class ConcurrentAggregationProcessor implements JobProcessor {
       return;
     }
 
+    String claimedIdentity;
+    // Validations ensure that at least one of the parameters will always exist.
+    if (job.requestInfo().getJobParametersMap().containsKey(JOB_PARAM_REPORTING_SITE)) {
+      claimedIdentity = job.requestInfo().getJobParametersMap().get(JOB_PARAM_REPORTING_SITE);
+    } else {
+      try {
+        claimedIdentity =
+            ReportingOriginUtils.convertReportingOriginToSite(
+                job.requestInfo().getJobParametersMap().get(JOB_PARAM_ATTRIBUTION_REPORT_TO));
+      } catch (InvalidReportingOriginException e) {
+        // This should never happen due to validations ensuring that the reporting origin is always
+        // valid.
+        throw new IllegalStateException(
+            "Invalid reporting origin found while consuming budget, this should not happen as job"
+                + " validations ensure the reporting origin is always valid.",
+            e);
+      }
+    }
+
     ImmutableList<PrivacyBudgetUnit> missingPrivacyBudgetUnits;
     try {
       try (Timer t =
           oTelConfiguration.createDebugTimerStarted("pbs_latency", toJobKeyString(job.jobKey()))) {
+        final String reportingOrigin =
+            job.requestInfo().getJobParametersMap().get(JOB_PARAM_ATTRIBUTION_REPORT_TO);
         missingPrivacyBudgetUnits =
             privacyBudgetingServiceBridge.consumePrivacyBudget(
-                budgetsToConsume, /* budgetsToConsume */
-                job.requestInfo() /* attributionReportTo */
-                    .getJobParametersMap()
-                    .get(JOB_PARAM_ATTRIBUTION_REPORT_TO));
+                budgetsToConsume, claimedIdentity);
       }
     } catch (PrivacyBudgetingServiceBridgeException e) {
       if (e.getStatusCode() != null) {
@@ -500,6 +495,9 @@ public final class ConcurrentAggregationProcessor implements JobProcessor {
     return Flowable.using(
         () -> {
           try {
+            if (blobStorageClient.getBlobSize(shard) <= 0) {
+              return InputStream.nullInputStream();
+            }
             return blobStorageClient.getBlob(shard);
           } catch (BlobStorageClientException e) {
             throw new ConcurrentShardReadException(e);
@@ -542,6 +540,10 @@ public final class ConcurrentAggregationProcessor implements JobProcessor {
                             decryptAndAggregateReports(
                                 encryptedReports, job, aggregationEngine, errorAggregator)),
             NUM_PROCESS_THREADS)
+        .takeUntil(
+            unused -> {
+              return errorAggregator.countsAboveThreshold();
+            })
         .blockingSubscribe();
   }
 

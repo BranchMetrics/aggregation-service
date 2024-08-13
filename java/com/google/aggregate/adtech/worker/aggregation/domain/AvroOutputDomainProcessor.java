@@ -16,27 +16,19 @@
 
 package com.google.aggregate.adtech.worker.aggregation.domain;
 
-import static com.google.common.collect.ImmutableList.toImmutableList;
-
 import com.google.aggregate.adtech.worker.Annotations.BlockingThreadPool;
 import com.google.aggregate.adtech.worker.Annotations.DomainOptional;
 import com.google.aggregate.adtech.worker.Annotations.EnableThresholding;
 import com.google.aggregate.adtech.worker.Annotations.NonBlockingThreadPool;
 import com.google.aggregate.adtech.worker.exceptions.DomainReadException;
 import com.google.aggregate.perf.StopwatchRegistry;
-import com.google.aggregate.protocol.avro.AvroOutputDomainReader;
 import com.google.aggregate.protocol.avro.AvroOutputDomainReaderFactory;
 import com.google.aggregate.protocol.avro.AvroOutputDomainRecord;
-import com.google.common.base.Stopwatch;
-import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.scp.operator.cpio.blobstorageclient.BlobStorageClient;
-import com.google.scp.operator.cpio.blobstorageclient.BlobStorageClient.BlobStorageClientException;
-import com.google.scp.operator.cpio.blobstorageclient.model.DataLocation;
 import java.io.IOException;
 import java.io.InputStream;
 import java.math.BigInteger;
-import java.util.UUID;
 import java.util.stream.Stream;
 import javax.inject.Inject;
 import org.apache.avro.AvroRuntimeException;
@@ -70,29 +62,10 @@ public final class AvroOutputDomainProcessor extends OutputDomainProcessor {
   }
 
   @Override
-  protected ImmutableList<BigInteger> readShard(DataLocation outputDomainLocation) {
-    Stopwatch stopwatch =
-        stopwatches.createStopwatch(String.format("domain-shard-read-%s", UUID.randomUUID()));
-    stopwatch.start();
-    try (InputStream domainStream = blobStorageClient.getBlob(outputDomainLocation)) {
-      AvroOutputDomainReader outputDomainReader = avroReaderFactory.create(domainStream);
-      ImmutableList<BigInteger> shard =
-          outputDomainReader
-              .streamRecords()
-              .map(AvroOutputDomainRecord::bucket)
-              .collect(toImmutableList());
-      stopwatch.stop();
-      return shard;
-    } catch (IOException | BlobStorageClientException | AvroRuntimeException e) {
-      stopwatch.stop(); // stop the stopwatch if an exception occurs
-      throw new DomainReadException(e);
-    }
-  }
-
-  @Override
   public Stream<BigInteger> readInputStream(InputStream shardInputStream) {
     try {
-      return avroReaderFactory.create(shardInputStream)
+      return avroReaderFactory
+          .create(shardInputStream)
           .streamRecords()
           .map(AvroOutputDomainRecord::bucket);
     } catch (IOException | AvroRuntimeException e) {

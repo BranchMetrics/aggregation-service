@@ -5,16 +5,13 @@
 To test the aggregation service with support for encrypted reports, you need the following:
 
 -   Have a [GCP project](https://cloud.google.com/).
--   [Register](https://developer.chrome.com/origintrials/#/view_trial/771241436187197441) for the
-    Privacy Sandbox Relevance and Measurement origin trial (OT)
 -   Run the [Adtech Setup Terraform](#adtech-setup-terraform) to create/configure the service
     account needed for onboarding.
 -   Complete the aggregation service [onboarding form](https://forms.gle/EHoecersGKhpcLPNA)
 
 Once you've submitted the onboarding form, we will contact you to verify your information. Then,
 we'll send you the remaining instructions and information needed for this setup.</br> _You won't be
-able to successfully setup your GCP deployment without registering for the origin trial and
-completing the onboarding process!_
+able to successfully setup your GCP deployment without completing the onboarding process!_
 
 To set up aggregation service in GCP you'll use [Terraform](https://www.terraform.io/).
 
@@ -145,6 +142,9 @@ folder:
     Apply complete! Resources: 54 added, 0 changed, 0 destroyed.
     ...
     ```
+
+_Note: Please be advised that executing `terraform destroy` for the Adtech Setup environment will
+result in the deletion of all resources generated within that environment._
 
 ## Set up your deployment environment
 
@@ -325,3 +325,29 @@ file into smaller shards.
     _Note: This API requires authentication. Follow the
     [Google Cloud Function instructions](https://cloud.google.com/functions/docs/securing/authenticating)
     for sending an authenticated request. [Detailed API spec](/docs/api.md#getjob-endpoint)_
+
+## Updating the system
+
+Run the following in the `<repository_root>`.
+
+```sh
+git fetch origin && git checkout -b dev-v{VERSION} v{VERSION}
+cd terraform/gcp
+bash download_prebuilt_dependencies.sh
+cd environments/dev
+terraform apply
+```
+
+_Note: If you use self-built artifacts described in
+[build-scripts/gcp](/build-scripts/gcp/README.md), run `bash fetch_terraform.sh` instead of
+`bash download_prebuilt_dependencies.sh` and make sure you updated your dependencies in the `jars`
+folder._
+
+_Note: When migrating to new coordinator pair from version 2.[4|5|6].z to 2.7.z or later, ensure the
+file `/terraform/gcp/environments/shared/release_params.auto.tfvars` was updated with the following
+values:_
+
+```sh
+coordinator_a_impersonate_service_account = "a-opallowedusr@ps-msmt-coord-prd-g3p-svcacc.iam.gserviceaccount.com"
+coordinator_b_impersonate_service_account = "b-opallowedusr@ps-prod-msmt-type2-e541.iam.gserviceaccount.com"
+```

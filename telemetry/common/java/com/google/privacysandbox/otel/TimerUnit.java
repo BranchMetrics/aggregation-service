@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 Google LLC
+ * Copyright 2024 Google LLC
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,20 +14,10 @@
  * limitations under the License.
  */
 
-package com.google.aggregate.adtech.worker.testing;
+package com.google.privacysandbox.otel;
 
-import com.google.scp.operator.cpio.cryptoclient.PrivateKeyFetchingService;
-
-/** Fake PrivateKeyFetchingService which returns a preconfigured response. */
-public final class FakePrivateKeyFetchingService implements PrivateKeyFetchingService {
-
-  private String response = "";
-
-  public String fetchKeyCiphertext(String keyId) throws PrivateKeyFetchingServiceException {
-    return response;
-  }
-
-  public void setResponse(String newResponse) {
-    response = newResponse;
-  }
+/** enum to select the unit of timer */
+public enum TimerUnit {
+  SECONDS,
+  NANOSECONDS
 }

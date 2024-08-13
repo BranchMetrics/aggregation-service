@@ -22,12 +22,15 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.aggregate.adtech.worker.model.AggregatedFact;
 import com.google.aggregate.adtech.worker.testing.AvroResultsFileReader;
+import com.google.aggregate.adtech.worker.util.JobUtils;
 import com.google.aggregate.protocol.avro.AvroDebugResultsReader;
 import com.google.aggregate.protocol.avro.AvroDebugResultsReaderFactory;
 import com.google.aggregate.protocol.avro.AvroDebugResultsRecord;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.io.ByteStreams;
+import com.google.common.primitives.UnsignedLong;
 import com.google.protobuf.util.JsonFormat;
 import com.google.scp.operator.cpio.blobstorageclient.BlobStorageClient.BlobStorageClientException;
 import com.google.scp.operator.cpio.blobstorageclient.aws.S3BlobStorageClient;
@@ -47,6 +50,7 @@ import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -73,13 +77,15 @@ public class AwsWorkerContinuousTestHelper {
 
   public static final Region AWS_API_GATEWAY_REGION = Region.US_EAST_1;
   public static final Region AWS_S3_BUCKET_REGION = Region.US_EAST_1;
+
+  public static final String DEFAULT_ATTRIBUTION_REPORT_TO = "https://subdomain.fakeurl.com";
+  public static final String DEFAULT_REPORTING_SITE = "https://fakeurl.com";
+
+  public static final String ENV_ATTRIBUTION_REPORT_TO = System.getenv("ATTRIBUTION_REPORT_TO");
+  public static final String ENV_REPORTING_SITE = System.getenv("REPORTING_SITE");
   public static final String FRONTEND_API = System.getenv("FRONTEND_API");
   public static final String KOKORO_BUILD_ID = System.getenv("KOKORO_BUILD_ID");
-  // The attribution_report_to in job params should be configurable because this needs to match
-  // allowed_principals_map in coordinator setting which would be different in different test
-  // environments.
-  public static final String ENV_ATTRIBUTION_REPORT_TO = System.getenv("ATTRIBUTION_REPORT_TO");
-  public static final String DEFAULT_ATTRIBUTION_REPORT_TO = "foo.com";
+
   public static final String CREATE_JOB_URI_PATTERN =
       "https://%s.execute-api.us-east-1.amazonaws.com/%s/%s/createJob";
   public static final String GET_JOB_URI_PATTERN =
@@ -110,6 +116,13 @@ public class AwsWorkerContinuousTestHelper {
     return DEFAULT_ATTRIBUTION_REPORT_TO;
   }
 
+  private static String getReportingSite() {
+    if (ENV_REPORTING_SITE != null) {
+      return ENV_REPORTING_SITE;
+    }
+    return DEFAULT_REPORTING_SITE;
+  }
+
   /** Helper for extracting a bucket name from an S3 URI. */
   public static String getS3Bucket(String s3Uri) {
     return parseS3Uri(s3Uri).group("bucket");
@@ -133,7 +146,7 @@ public class AwsWorkerContinuousTestHelper {
         : outputKey + outputSuffix;
   }
 
-  public static CreateJobRequest createJobRequest(
+  public static CreateJobRequest createJobRequestWithAttributionReportTo(
       String inputDataBlobBucket,
       String inputDataBlobPrefix,
       String outputDataBlobBucket,
@@ -147,11 +160,43 @@ public class AwsWorkerContinuousTestHelper {
             outputDataBlobBucket,
             outputDataBlobPrefix,
             jobId)
-        .putAllJobParameters(getJobParams(false, outputDomainBucketName, outputDomainPrefix, 100))
+        .putAllJobParameters(
+            getJobParamsWithAttributionReportTo(
+                false,
+                outputDomainBucketName,
+                outputDomainPrefix,
+                /* reportErrorThresholdPercentage= */ 0,
+                /* inputReportCount= */ Optional.empty(),
+                /* filteringIds= */ Optional.empty()))
         .build();
   }
 
-  public static CreateJobRequest createJobRequest(
+  public static CreateJobRequest createJobRequestWithReportingSite(
+      String inputDataBlobBucket,
+      String inputDataBlobPrefix,
+      String outputDataBlobBucket,
+      String outputDataBlobPrefix,
+      String jobId,
+      Optional<String> outputDomainBucketName,
+      Optional<String> outputDomainPrefix) {
+    ImmutableMap<String, String> jobParams =
+        getJobParamsWithReportingSite(
+            false,
+            outputDomainBucketName,
+            outputDomainPrefix,
+            /* reportErrorThresholdPercentage= */ 100,
+            /* inputReportCount= */ Optional.empty());
+    return createDefaultJobRequestBuilder(
+            inputDataBlobBucket,
+            inputDataBlobPrefix,
+            outputDataBlobBucket,
+            outputDataBlobPrefix,
+            jobId)
+        .putAllJobParameters(jobParams)
+        .build();
+  }
+
+  public static CreateJobRequest createJobRequestWithAttributionReportTo(
       String inputDataBlobBucket,
       String inputDataBlobPrefix,
       String outputDataBlobBucket,
@@ -167,11 +212,17 @@ public class AwsWorkerContinuousTestHelper {
             outputDataBlobPrefix,
             jobId)
         .putAllJobParameters(
-            getJobParams(debugRun, outputDomainBucketName, outputDomainPrefix, 100))
+            getJobParamsWithAttributionReportTo(
+                debugRun,
+                outputDomainBucketName,
+                outputDomainPrefix,
+                /* reportErrorThresholdPercentage= */ 0,
+                /* inputReportCount= */ Optional.empty(),
+                /* filteringIds= */ Optional.empty()))
         .build();
   }
 
-  public static CreateJobRequest createJobRequest(
+  public static CreateJobRequest createJobRequestWithAttributionReportTo(
       String inputDataBlobBucket,
       String inputDataBlobPrefix,
       String outputDataBlobBucket,
@@ -180,7 +231,9 @@ public class AwsWorkerContinuousTestHelper {
       String jobId,
       Optional<String> outputDomainBucketName,
       Optional<String> outputDomainPrefix,
-      int reportErrorThresholdPercentage) {
+      int reportErrorThresholdPercentage,
+      Optional<Long> inputReportCount,
+      Set<UnsignedLong> filteringIds) {
     return createDefaultJobRequestBuilder(
             inputDataBlobBucket,
             inputDataBlobPrefix,
@@ -188,11 +241,41 @@ public class AwsWorkerContinuousTestHelper {
             outputDataBlobPrefix,
             jobId)
         .putAllJobParameters(
-            getJobParams(
+            getJobParamsWithAttributionReportTo(
                 debugRun,
                 outputDomainBucketName,
                 outputDomainPrefix,
-                reportErrorThresholdPercentage))
+                reportErrorThresholdPercentage,
+                inputReportCount,
+                Optional.of(filteringIds)))
+        .build();
+  }
+
+  public static CreateJobRequest createJobRequestWithAttributionReportTo(
+      String inputDataBlobBucket,
+      String inputDataBlobPrefix,
+      String outputDataBlobBucket,
+      String outputDataBlobPrefix,
+      Boolean debugRun,
+      String jobId,
+      Optional<String> outputDomainBucketName,
+      Optional<String> outputDomainPrefix,
+      int reportErrorThresholdPercentage,
+      Optional<Long> inputReportCount) {
+    return createDefaultJobRequestBuilder(
+            inputDataBlobBucket,
+            inputDataBlobPrefix,
+            outputDataBlobBucket,
+            outputDataBlobPrefix,
+            jobId)
+        .putAllJobParameters(
+            getJobParamsWithAttributionReportTo(
+                debugRun,
+                outputDomainBucketName,
+                outputDomainPrefix,
+                reportErrorThresholdPercentage,
+                inputReportCount,
+                /* filteringIds= */ Optional.empty()))
         .build();
   }
 
@@ -219,17 +302,60 @@ public class AwsWorkerContinuousTestHelper {
         .putAllJobParameters(ImmutableMap.of());
   }
 
-  private static ImmutableMap<String, String> getJobParams(
+  private static ImmutableMap<String, String> getJobParamsWithAttributionReportTo(
       Boolean debugRun,
       Optional<String> outputDomainBucketName,
       Optional<String> outputDomainPrefix,
-      int reportErrorThresholdPercentage) {
+      int reportErrorThresholdPercentage,
+      Optional<Long> inputReportCountOptional,
+      Optional<Set<UnsignedLong>> filteringIdsOptional) {
     ImmutableMap.Builder<String, String> jobParams = ImmutableMap.builder();
     jobParams.put("attribution_report_to", getAttributionReportTo());
 
     if (debugRun) {
       jobParams.put("debug_run", "true");
     }
+    inputReportCountOptional.ifPresent(
+        inputReportCount ->
+            jobParams.put(JobUtils.JOB_PARAM_INPUT_REPORT_COUNT, String.valueOf(inputReportCount)));
+    jobParams.put(
+        "report_error_threshold_percentage", String.valueOf(reportErrorThresholdPercentage));
+    if (outputDomainPrefix.isPresent() && outputDomainBucketName.isPresent()) {
+      jobParams.put("output_domain_blob_prefix", outputDomainPrefix.get());
+      jobParams.put("output_domain_bucket_name", outputDomainBucketName.get());
+    } else if (!(outputDomainPrefix.isEmpty() && outputDomainBucketName.isEmpty())) {
+      throw new IllegalStateException(
+          "outputDomainPrefix and outputDomainBucketName must both be provided or both be empty.");
+    }
+
+    if (filteringIdsOptional.isPresent()) {
+      Set<UnsignedLong> filteringIds = filteringIdsOptional.get();
+      jobParams.put(
+          JobUtils.JOB_PARAM_FILTERING_IDS,
+          String.join(
+              ",",
+              filteringIds.stream()
+                  .map(id -> id.toString())
+                  .collect(ImmutableSet.toImmutableSet())));
+    }
+
+    return jobParams.build();
+  }
+
+  private static ImmutableMap<String, String> getJobParamsWithReportingSite(
+      Boolean debugRun,
+      Optional<String> outputDomainBucketName,
+      Optional<String> outputDomainPrefix,
+      int reportErrorThresholdPercentage,
+      Optional<Long> inputReportCountOptional) {
+    ImmutableMap.Builder<String, String> jobParams = ImmutableMap.builder();
+    jobParams.put("reporting_site", getReportingSite());
+    if (debugRun) {
+      jobParams.put("debug_run", "true");
+    }
+    inputReportCountOptional.ifPresent(
+        inputReportCount ->
+            jobParams.put(JobUtils.JOB_PARAM_INPUT_REPORT_COUNT, String.valueOf(inputReportCount)));
     jobParams.put(
         "report_error_threshold_percentage", String.valueOf(reportErrorThresholdPercentage));
     if (outputDomainPrefix.isPresent() && outputDomainBucketName.isPresent()) {
@@ -342,19 +468,19 @@ public class AwsWorkerContinuousTestHelper {
     return callGetJobAPI(uri);
   }
 
+  /** Returns a list of AggregatedFact from the file matching the bucket and key. */
   public static ImmutableList<AggregatedFact> readResultsFromS3(
       S3BlobStorageClient s3BlobStorageClient,
       AvroResultsFileReader avroResultsFileReader,
-      String outputBucket,
-      String outputPrefix)
-      throws Exception {
+      String bucket,
+      String key)
+      throws BlobStorageClientException, IOException {
 
     Path tempResultFile = Files.createTempFile(/* prefix= */ "results", /* suffix= */ "avro");
 
     try (InputStream resultStream =
             s3BlobStorageClient.getBlob(
-                DataLocation.ofBlobStoreDataLocation(
-                    BlobStoreDataLocation.create(outputBucket, outputPrefix)));
+                DataLocation.ofBlobStoreDataLocation(BlobStoreDataLocation.create(bucket, key)));
         OutputStream outputStream = Files.newOutputStream(tempResultFile)) {
       ByteStreams.copy(resultStream, outputStream);
       outputStream.flush();
@@ -363,6 +489,26 @@ public class AwsWorkerContinuousTestHelper {
     ImmutableList<AggregatedFact> facts = avroResultsFileReader.readAvroResultsFile(tempResultFile);
     Files.deleteIfExists(tempResultFile);
     return facts;
+  }
+
+  /** Returns a list of AggregatedFacts from a list of files matching the bucket and prefix. */
+  public static ImmutableList<AggregatedFact> readResultsFromMultipleFiles(
+      S3BlobStorageClient s3BlobStorageClient,
+      AvroResultsFileReader avroResultsFileReader,
+      String bucket,
+      String prefix)
+      throws BlobStorageClientException, IOException {
+    BlobStoreDataLocation blobsPrefixLocation = BlobStoreDataLocation.create(bucket, prefix);
+    DataLocation prefixLocation = DataLocation.ofBlobStoreDataLocation(blobsPrefixLocation);
+    ImmutableList<String> shardBlobs = s3BlobStorageClient.listBlobs(prefixLocation);
+
+    ImmutableList.Builder<AggregatedFact> aggregatedFactBuilder = ImmutableList.builder();
+    for (String shard : shardBlobs) {
+      aggregatedFactBuilder.addAll(
+          readResultsFromS3(
+              s3BlobStorageClient, avroResultsFileReader, blobsPrefixLocation.bucket(), shard));
+    }
+    return aggregatedFactBuilder.build();
   }
 
   private static AvroDebugResultsReader getReader(
