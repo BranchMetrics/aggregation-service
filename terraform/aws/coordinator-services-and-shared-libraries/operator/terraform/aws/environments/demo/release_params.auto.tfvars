@@ -1,0 +1,1 @@
+../shared/release_params.auto.tfvars
